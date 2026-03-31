@@ -1,26 +1,26 @@
 #include <stdio.h>
 
+#define ML_RATE 1
 #define ML_IMPLEMENTATION
 #define ML_STRIP_PREFIXES
 #include "ml.h"
 
 MatItem train_data[] = {
-    0, 0, 0, 0,
-    1, 0, 0, 1,
-    0, 1, 0, 1,
-    1, 1, 1, 0,
+    0, 0, 0,
+    1, 0, 1,
+    0, 1, 1,
+    1, 1, 1,
 };
 
 int main() {
-    size_t arch[] = {2, 2, 2, 2};
+    size_t arch[] = {2, 2, 1};
     size_t arch_len = ML_ARRAY_LEN(arch);
     
     Neural_Network nn = nn_alloc(arch, arch_len);
-    Neural_Network gradient = nn_alloc(arch, arch_len);
 
     nn_randomize(nn, -1, 1);
 
-    size_t stride = 4;
+    size_t stride = 3;
     size_t rows = sizeof(train_data)/sizeof(train_data[0])/stride;
     TrainingSet training_data = {
         .in = (Mat){
@@ -31,14 +31,15 @@ int main() {
         },
     .out = {
             .rows = rows,
-            .cols = 2,
+            .cols = 1,
             .stride = stride,
             .items = &train_data[2],
         },
     };
     
     
-    nn_train_finite_difference(100*1000, nn, gradient, training_data);
+    nn_train(nn_backprop, 1000, nn, training_data);
+    //nn_train(nn_finite_diff, 1000, nn, training_data);
     
     printf("cost = %f\n", nn_cost(nn, training_data));
     for (size_t i = 0; i < training_data.in.rows; ++i) {

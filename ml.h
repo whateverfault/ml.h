@@ -11,11 +11,11 @@
 #define ML_NN_PRINT(nn) ml_nn_print(nn, #nn)
 
 #ifndef ML_EPS
-#define ML_EPS 1e-2
+#define ML_EPS 1e-1
 #endif //ML_EPS
 
 #ifndef ML_RATE
-#define ML_RATE 1e-2
+#define ML_RATE 1e-1
 #endif //ML_RATE
 
 typedef double MatItem;
@@ -27,6 +27,7 @@ typedef struct {
 } Mat;
 
 typedef struct {
+    size_t *arch;
     size_t layers;
     Mat *ws;
     Mat *bs;
@@ -38,12 +39,16 @@ typedef struct {
     Mat out;
 } TrainingSet;
 
+typedef void (*train_func_t)(Neural_Network nn, Neural_Network gradient, TrainingSet training_data);
+
 Neural_Network ml_nn_alloc(size_t *arch, size_t arch_count);
 void ml_nn_forward(Neural_Network nn);
 MatItem ml_nn_cost(Neural_Network nn, TrainingSet training_data);
-void ml_nn_finite_difference(Neural_Network nn, Neural_Network gradient, TrainingSet training_data);
-void ml_nn_train_finite_difference(size_t iterations, Neural_Network nn, Neural_Network gradient, TrainingSet training_data);
+void ml_nn_finite_diff(Neural_Network nn, Neural_Network gradient, TrainingSet training_data);
+void ml_nn_backprop(Neural_Network nn, Neural_Network gradient, TrainingSet training_data);
+void ml_nn_train(train_func_t train_func, size_t iterations, Neural_Network nn, TrainingSet training_data);
 void ml_nn_randomize(Neural_Network nn, MatItem min, MatItem max);
+void ml_nn_zero(Neural_Network nn);
 void ml_nn_print(Neural_Network nn, const char *name);
 
 Mat ml_mat_alloc(size_t rows, size_t cols);
@@ -85,6 +90,7 @@ Neural_Network ml_nn_alloc(size_t *arch, size_t arch_count) {
 
     size_t count = arch_count - 1;
     Neural_Network nn = {
+        .arch = arch,
         .layers = count,
         .ws = (Mat*)ML_MALLOC(count * sizeof(Mat)),
         .bs = (Mat*)ML_MALLOC(count * sizeof(Mat)),
@@ -137,7 +143,9 @@ MatItem ml_nn_cost(Neural_Network nn, TrainingSet training_data) {
     return c/n;
 }
 
-void ml_nn_finite_difference(Neural_Network nn, Neural_Network gradient, TrainingSet training_data) {
+void ml_nn_finite_diff(Neural_Network nn, Neural_Network gradient, TrainingSet training_data) {
+    ML_ASSERT(training_data.in.rows == training_data.out.rows);
+    
     MatItem c = ml_nn_cost(nn, training_data);
     MatItem saved;
 
@@ -164,25 +172,82 @@ void ml_nn_finite_difference(Neural_Network nn, Neural_Network gradient, Trainin
     }
 }
 
-void ml_nn_train_finite_difference(size_t iterations, Neural_Network nn, Neural_Network gradient, TrainingSet training_data) {
+void ml_nn_backprop(Neural_Network nn, Neural_Network gradient, TrainingSet training_data) {
+    ML_ASSERT(training_data.in.rows == training_data.out.rows);
+    ML_ASSERT(ML_NN_OUTPUT(nn).cols == training_data.out.cols);
+
+    ml_nn_zero(gradient);
+    
+    for (size_t i = 0; i < training_data.in.rows; ++i) {
+        ml_mat_copy(ML_NN_INPUT(nn), ml_mat_row(training_data.in, i));
+        ml_nn_forward(nn);
+
+        for (size_t j = 0;  j <= gradient.layers; ++j) {
+            ml_mat_fill(gradient.as[j], 0);
+        }
+        
+        for (size_t j = 0; j < training_data.out.cols; ++j) {
+            ML_MAT_AT(ML_NN_OUTPUT(gradient), 0, j) = 2 * (ML_MAT_AT(ML_NN_OUTPUT(nn), 0, j) - ML_MAT_AT(training_data.out, i, j));
+        }
+
+        for (size_t l = nn.layers; l > 0; --l) {
+            for (size_t j = 0; j < nn.as[l].cols; ++j) {
+                float a = ML_MAT_AT(nn.as[l], 0, j);
+                float da = ML_MAT_AT(gradient.as[l], 0, j);
+                float delta = da * a * (1 - a);
+
+                ML_MAT_AT(gradient.bs[l-1], 0, j) += delta;
+
+                for (size_t k = 0; k < nn.as[l-1].cols; ++k) {
+                    float pa = ML_MAT_AT(nn.as[l-1], 0, k);
+                    float w = ML_MAT_AT(nn.ws[l-1], k, j);
+                    
+                    ML_MAT_AT(gradient.ws[l-1], k, j) += delta * pa;
+                    ML_MAT_AT(gradient.as[l-1], 0, k) += delta * w;
+                }
+            }
+        }
+    }
+    
+    for (size_t i = 0; i < gradient.layers; ++i) {
+        for (size_t j = 0; j < gradient.ws[i].rows; ++j) {
+            for (size_t k = 0; k < gradient.ws[i].cols; ++k) {
+                ML_MAT_AT(gradient.ws[i], j, k) /= training_data.in.rows;
+            }
+        }
+
+        for (size_t j = 0; j < gradient.bs[i].rows; ++j) {
+            for (size_t k = 0; k < gradient.bs[i].cols; ++k) {
+                ML_MAT_AT(gradient.bs[i], j, k) /= training_data.in.rows;
+            }
+        }
+    }
+}
+
+void apply_gradient(Neural_Network nn, Neural_Network gradient) {
+    for (size_t k = 0; k < nn.layers; ++k) {
+        for (size_t n = 0; n < nn.ws[k].rows; ++n) {
+            for (size_t j = 0; j < nn.ws[k].cols; ++j) {
+                ML_MAT_AT(nn.ws[k], n, j) -= ML_MAT_AT(gradient.ws[k], n, j) * ML_RATE;
+            }
+        }
+    }
+
+    for (size_t k = 0; k < nn.layers; ++k) {
+        for (size_t n = 0; n < nn.bs[k].rows; ++n) {
+            for (size_t j = 0; j < nn.bs[k].cols; ++j) {
+                ML_MAT_AT(nn.bs[k], n, j) -= ML_MAT_AT(gradient.bs[k], n, j) * ML_RATE;
+            }
+        }
+    }
+}
+
+void ml_nn_train(train_func_t train_func, size_t iterations, Neural_Network nn, TrainingSet training_data) {
+    Neural_Network gradient = ml_nn_alloc(nn.arch, nn.layers + 1);
+    
     for (size_t i = 0; i < iterations; ++i) {
-        ml_nn_finite_difference(nn, gradient, training_data);
-
-        for (size_t k = 0; k < nn.layers; ++k) {
-            for (size_t n = 0; n < nn.ws[k].rows; ++n) {
-                for (size_t j = 0; j < nn.ws[k].cols; ++j) {
-                    ML_MAT_AT(nn.ws[k], n, j) -= ML_MAT_AT(gradient.ws[k], n, j) * ML_RATE;
-                }
-            }
-        }
-
-        for (size_t k = 0; k < nn.layers; ++k) {
-            for (size_t n = 0; n < nn.bs[k].rows; ++n) {
-                for (size_t j = 0; j < nn.bs[k].cols; ++j) {
-                    ML_MAT_AT(nn.bs[k], n, j) -= ML_MAT_AT(gradient.bs[k], n, j) * ML_RATE;
-                }
-            }
-        }
+        train_func(nn, gradient, training_data);
+        apply_gradient(nn, gradient);
     }
 }
 
@@ -191,6 +256,16 @@ void ml_nn_randomize(Neural_Network nn, MatItem min, MatItem max) {
         ml_mat_randomize(nn.ws[i], min, max);
         ml_mat_randomize(nn.bs[i], min, max);
     }
+}
+
+void ml_nn_zero(Neural_Network nn) {
+    for (size_t i = 0; i < nn.layers; ++i) {
+        ml_mat_fill(nn.ws[i], 0);
+        ml_mat_fill(nn.bs[i], 0);
+        ml_mat_fill(nn.as[i], 0);
+    }
+
+    ml_mat_fill(nn.as[nn.layers], 0);
 }
 
 void ml_nn_print(Neural_Network nn, const char *name) {
@@ -362,9 +437,11 @@ MatItem ml_sigmoid(MatItem x) {
 #define nn_alloc ml_nn_alloc
 #define nn_forward ml_nn_forward
 #define nn_cost ml_nn_cost
-#define nn_finite_difference ml_nn_finite_difference
-#define nn_train_finite_difference ml_nn_train_finite_difference 
+#define nn_finite_diff ml_nn_finite_diff
+#define nn_backprop ml_nn_backprop
+#define nn_train ml_nn_train
 #define nn_randomize ml_nn_randomize
+#define nn_zero ml_nn_zero
 #define nn_print ml_nn_print
 
 #define mat_alloc ml_mat_alloc
